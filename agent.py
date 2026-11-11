@@ -21,7 +21,26 @@ def run_agent(question, provider, tools, max_steps=6):
     usage = []
 
     for step in range(1, max_steps + 1):
-        response = provider.complete(messages, SCHEMAS)
+        try:
+            response = provider.complete(messages, SCHEMAS)
+        except Exception as exc:
+            # Provider failures end the run because there is no model available
+            # to interpret another observation. Do not include request data or
+            # credentials in the trace.
+            error = f'{type(exc).__name__}: {str(exc)[:200]}'
+            trace.append({
+                'event': 'provider_error',
+                'step': step,
+                'error': error,
+            })
+            return {
+                'status': 'error',
+                'answer': '',
+                'trace': trace,
+                'usage': usage,
+                'error': error,
+            }
+
         message = response['message']
         calls = response.get('calls', [])
         finish = response.get('finish')
@@ -30,6 +49,15 @@ def run_agent(question, provider, tools, max_steps=6):
         messages.append(message)
         usage.append(response.get('usage', {}))
         trace.append({'event': 'model', 'step': step, 'finish': finish})
+
+        if finish == 'length':
+            return {
+                'status': 'error',
+                'answer': message.get('content') or '',
+                'trace': trace,
+                'usage': usage,
+                'error': 'Model output bị cắt do đạt giới hạn độ dài.',
+            }
 
         # Thực thi mọi tool call trong response trước lần gọi model tiếp theo.
         for call in calls:
@@ -43,7 +71,16 @@ def run_agent(question, provider, tools, max_steps=6):
                 }
                 arguments = call.get('arguments')
             else:
-                result = tools.execute(call['name'], arguments)
+                try:
+                    result = tools.execute(call['name'], arguments)
+                except Exception as exc:
+                    # Tool failures are observations: return them to the model
+                    # so it can report which evidence could not be collected.
+                    result = {
+                        'ok': False,
+                        'error': type(exc).__name__,
+                        'message': str(exc)[:200],
+                    }
 
             trace.append({
                 'event': 'tool',
