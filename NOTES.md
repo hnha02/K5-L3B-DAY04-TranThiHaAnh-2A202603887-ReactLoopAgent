@@ -39,6 +39,10 @@ nhân/ảnh hưởng. Vì vậy model tổng hợp từ hai kết quả đầu v
   yêu cầu theo liên kết. Đồng thời lưu URL từ `get_incident_details` thành công và
   thêm validation gate trước trạng thái `completed`: nếu final answer thiếu URL đã
   quan sát, ghi event `validation_missing_source` và yêu cầu model sửa trong budget.
+  Sau lần eval thứ hai cho thấy lời nhắc mềm chưa đủ, bổ sung validation
+  `validation_unread_related_incident`: trích provider và incident ID từ URL trong
+  updates; nếu câu hỏi yêu cầu theo liên kết mà ID đó chưa được đọc, chặn final
+  answer và yêu cầu model gọi `get_incident_details` trước.
 - Vì sao chọn thay đổi này: trace H1 cho thấy model dừng quá sớm dù bằng chứng chứa
   liên kết cần điều tra tiếp. Validation gate cũng bảo đảm câu trả lời cuối có nguồn
   incident đã dùng, nhưng không coi sự hiện diện của URL là bằng chứng rằng mọi claim
@@ -48,24 +52,25 @@ nhân/ảnh hưởng. Vì vậy model tổng hợp từ hai kết quả đầu v
 
 | Chỉ số | `eval_before.json` | `eval_after.json` |
 |---|---|---|
-| Điểm tổng | 79.23/100 | 73.27/100 |
-| Điểm case đã chọn | H1: 60/100 | H1: 60/100 |
-| Số model calls của H1 | 2 | 2 |
-| Token của H1 | agent: 2,003; judge: 2,138 | agent: 2,172; judge: 2,237 |
+| Điểm tổng | 79.23/100 | 81.36/100 |
+| Điểm case đã chọn | H1: 60/100 | H1: 80/100 |
+| Số model calls của H1 | 2 | 4 |
+| Token của H1 | agent: 2,003; judge: 2,138 | agent: 6,771; judge: 2,701 |
 
 - Hai lần dùng cùng provider/model, judge, `max_steps=8` và dataset core; cả hai
   đều chấm đủ 22/22 case. API không cung cấp chi phí tiền trong usage nên không thể
-  báo chi phí chính xác. Toàn bộ eval dùng 51 → 50 agent model calls và
-  41,836 → 41,570 agent tokens.
-- Lỗi đã giải quyết: validation gate về URL đã được implement; toàn bộ 37 unit test,
-  gồm hai test nguồn từng thất bại, đều pass. Trong lần eval sau không phát sinh
-  `validation_missing_source` vì các final answer đã chứa URL incident quan sát được.
-- Lỗi còn lại hoặc mới xuất hiện: H1 vẫn chỉ gọi hai tool trong cùng step 1 và vẫn
-  không gọi `get_incident_details` cho `xr3myzj7ms51`; mechanical cap vẫn giữ điểm
-  ở 60. Quy tắc prompt chưa đủ để buộc model điều tra thêm. Điểm tổng giảm 5.96 điểm;
-  một số case tăng (H5 +25, H7/H8 +20) nhưng một số case giảm mạnh (H2 -50,
-  H3 -58), cho thấy biến thiên giữa các lần chạy và khả năng thay đổi prompt gây
-  tác dụng phụ.
+  báo chi phí chính xác. Toàn bộ eval dùng 51 → 55 agent model calls và
+  41,836 → 56,223 agent tokens.
+- Lỗi đã giải quyết: tại H1, sau final answer đầu ở step 2, validation ghi
+  `validation_unread_related_incident` cho `xr3myzj7ms51`; model gọi
+  `get_incident_details` cho ID này ở step 3 rồi mới trả lời. H1 tăng 60 → 80 và
+  không còn vi phạm yêu cầu tool calls ở nhiều model steps. Validation nguồn cũng
+  đã được implement và toàn bộ 37 unit test đều pass.
+- Lỗi còn lại hoặc mới xuất hiện: judge H1 vẫn nhận xét phần bằng chứng về nguyên
+  nhân chung và một số mốc thời gian chưa đủ rõ. Cải tiến làm tăng chi phí: H1 dùng
+  thêm 2 model calls và 4,768 agent tokens; H6 dùng 5 calls và 13,839 tokens nhưng
+  chỉ tăng 5 điểm. Điểm tổng tăng 2.13, tuy vậy một số case vẫn giảm mạnh như H2
+  (-50), A3 (-20), H3 (-15), cho thấy biến thiên và tác dụng phụ vẫn còn.
 
 ## 5. Giới hạn
 
@@ -74,8 +79,9 @@ nhân/ảnh hưởng. Vì vậy model tổng hợp từ hai kết quả đầu v
 - Snapshot được ghi tại một thời điểm cố định, chỉ tìm trong 50 incident gần nhất và
   tool còn lược bớt updates; kết quả không đại diện cho trạng thái live hiện tại.
 - Chỉ chạy một lần cho mỗi phiên bản không chứng minh độ ổn định. Sự thay đổi lớn ở
-  H2/H3 trong khi H1 không đổi là bằng chứng rằng chưa thể quy toàn bộ chênh lệch
-  điểm cho thay đổi code.
+  các case H2/A3/H3 là bằng chứng rằng chưa thể quy toàn bộ chênh lệch điểm cho thay
+  đổi code; cần nhiều lần chạy để ước lượng ổn định hơn.
 - Validation gate chỉ kiểm tra URL có xuất hiện trong answer; nó không chứng minh
-  mọi claim đều được URL đó hỗ trợ. System prompt cũng không bảo đảm model luôn theo
-  incident liên quan, như kết quả H1 lần hai đã cho thấy.
+  mọi claim đều được URL đó hỗ trợ. Validation incident liên quan chỉ áp dụng khi
+  câu hỏi yêu cầu theo liên kết và URL có dạng mà regex nhận diện; nó có thể bỏ sót
+  shortlink hoặc cách diễn đạt khác.

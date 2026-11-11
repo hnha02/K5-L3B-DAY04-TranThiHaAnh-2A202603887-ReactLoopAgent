@@ -1,8 +1,14 @@
 """Agent loop điều tra trạng thái GitHub và Cloudflare."""
 
 import json
+import re
 
 from status_tools import SCHEMAS
+
+RELATED_INCIDENT_PATTERN = re.compile(
+    r'https?://(?:www\.)?(githubstatus|cloudflarestatus)\.com/incidents/([\w-]+)',
+    re.IGNORECASE,
+)
 
 SYSTEM_PROMPT = '''Bạn là trợ lý điều tra trạng thái GitHub và Cloudflare.
 Dùng tools trước khi khẳng định về trạng thái. Phân biệt incident hiện tại và lịch sử,
@@ -22,6 +28,12 @@ def run_agent(question, provider, tools, max_steps=6):
     trace = []
     usage = []
     observed_incident_urls = []
+    observed_incidents = set()
+    related_incidents = set()
+    follow_related_incidents = any(
+        phrase in question.casefold()
+        for phrase in ('theo liên kết', 'đọc incident liên quan', 'đọc sự cố liên quan')
+    )
 
     for step in range(1, max_steps + 1):
         try:
@@ -89,10 +101,23 @@ def run_agent(question, provider, tools, max_steps=6):
                 call['name'] == 'get_incident_details'
                 and isinstance(result, dict)
                 and result.get('ok') is True
-                and result.get('url')
-                and result['url'] not in observed_incident_urls
             ):
-                observed_incident_urls.append(result['url'])
+                incident = (result.get('provider'), result.get('id'))
+                observed_incidents.add(incident)
+
+                if result.get('url') and result['url'] not in observed_incident_urls:
+                    observed_incident_urls.append(result['url'])
+
+                if follow_related_incidents:
+                    update_text = ' '.join(
+                        update.get('body', '') for update in result.get('updates', [])
+                    )
+                    for host, incident_id in RELATED_INCIDENT_PATTERN.findall(update_text):
+                        related_provider = {
+                            'githubstatus': 'github',
+                            'cloudflarestatus': 'cloudflare',
+                        }[host.casefold()]
+                        related_incidents.add((related_provider, incident_id))
 
             trace.append({
                 'event': 'tool',
@@ -112,6 +137,31 @@ def run_agent(question, provider, tools, max_steps=6):
 
         if finish == 'stop':
             answer = message.get('content') or ''
+            unread_incidents = sorted(related_incidents - observed_incidents)
+            if unread_incidents:
+                trace.append({
+                    'event': 'validation_unread_related_incident',
+                    'step': step,
+                    'incidents': [
+                        {'provider': provider_name, 'incident_id': incident_id}
+                        for provider_name, incident_id in unread_incidents
+                    ],
+                })
+                requested_calls = ', '.join(
+                    f'get_incident_details(provider={provider_name!r}, '
+                    f'incident_id={incident_id!r})'
+                    for provider_name, incident_id in unread_incidents
+                )
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        'Chưa được kết luận: câu hỏi yêu cầu theo liên kết nhưng các '
+                        'incident liên quan sau chưa được đọc. Hãy gọi tool trước: '
+                        + requested_calls
+                    ),
+                })
+                continue
+
             missing_urls = [
                 url for url in observed_incident_urls if url not in answer
             ]
